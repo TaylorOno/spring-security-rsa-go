@@ -17,9 +17,9 @@ type RSARawEncryptorBuilder struct {
 	publicKey  *rsa.PublicKey
 }
 
-//NewRawEncryptorBuilder create a encryptor builder.  If a private key is set it will build a encryptor/decryptor.  If a
+//NewRSARawEncryptorBuilder create a encryptor builder.  If a private key is set it will build a encryptor/decryptor.  If a
 //public key is set it will build an encryptor.  If no key is set it will generate a random 2096 bit key for encryption decryption.
-func NewRawEncryptorBuilder() *RSARawEncryptorBuilder {
+func NewRSARawEncryptorBuilder() *RSARawEncryptorBuilder {
 	return &RSARawEncryptorBuilder{}
 }
 

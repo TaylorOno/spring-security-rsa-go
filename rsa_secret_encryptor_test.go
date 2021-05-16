@@ -63,7 +63,6 @@ func TestSecretEncryptSpringCompatible(t *testing.T) {
 	}
 	if got != ("encryptor") {
 		t.Errorf("Decrypt(%v) = %v; want %v", springCipherText, got, "encryptor")
-
 		return
 	}
 }

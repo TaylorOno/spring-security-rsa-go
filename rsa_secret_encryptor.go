@@ -11,15 +11,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 
 	"golang.org/x/crypto/pbkdf2"
 )
+
+const _AESSecretSize = 16
 
 type RSASecretEncryptor struct {
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
 }
-
 
 type RSASecretEncryptorBuilder struct {
 	privateKey *rsa.PrivateKey
@@ -70,16 +72,55 @@ func (b *RSASecretEncryptorBuilder) Build() (*RSASecretEncryptor, error) {
 	}, nil
 }
 
-//Encrypt encrypts a given string as RSA PKCS1v5 and returns a base64 representation.
-func (r *RSASecretEncryptor) Encrypt(text string) (string, error) {
-	ciphertext, err := rsa.EncryptPKCS1v15(rand.Reader, r.publicKey, []byte(text))
+//Encrypt takes a plainText string and will generate a random 16 byte password.  That is used to AES encrypt the secret.
+//the password will then be RSA encrypted an prepended to the cipher text which is returned as a base64 encoded string.
+func (r *RSASecretEncryptor) Encrypt(plainText string) (string, error) {
+	random := make([]byte, _AESSecretSize)
+	rand.Reader.Read(random)
+
+	secret, err := rsa.EncryptPKCS1v15(rand.Reader, r.publicKey, random)
 	if err != nil {
 		return "", err
 	}
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
+
+	cipher, err := encryptAES(hex.EncodeToString(random), []byte(plainText))
+	cipherBytes := bytes.Buffer{}
+
+	//cipherBytes[0:2] bytes used to store encrypted password length
+	cipherBytes.Write(writeInt(len(secret)))
+
+	//cipherBytes[2:length] RSA encrypted AES password
+	cipherBytes.Write(secret)
+
+	//cipherBytes[length:] AES encrypted bytes
+	cipherBytes.Write(cipher)
+	return base64.StdEncoding.EncodeToString(cipherBytes.Bytes()), nil
 }
 
-//Decrypt decrypts a base64 string into plain text.
+func encryptAES(password string, plaintext []byte) ([]byte, error) {
+	plaintext = PKCS5Padding(plaintext, aes.BlockSize)
+
+	springKey := deriveSpringKey(password)
+	fmt.Printf("springKey Encrypt:%v\n", hex.EncodeToString(springKey))
+	block, err := aes.NewCipher(springKey)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	ciphertext := make([]byte, aes.BlockSize+len(plaintext))
+	iv := ciphertext[:aes.BlockSize]
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return []byte{}, err
+	}
+
+	mode := cipher.NewCBCEncrypter(block, iv)
+	mode.CryptBlocks(ciphertext[aes.BlockSize:], plaintext)
+
+	return ciphertext, nil
+}
+
+//Decrypt a base64 encoded cipherText string by first decrypting the aes password prefix.  Then uses the decrypted
+//password to decrypt the AES encrypted payload returning a plaintext string.
 func (r *RSASecretEncryptor) Decrypt(cipherText string) (string, error) {
 	if !r.canDecrypt() {
 		return "", fmt.Errorf("no private key configured")
@@ -89,23 +130,26 @@ func (r *RSASecretEncryptor) Decrypt(cipherText string) (string, error) {
 		return "", err
 	}
 
+	//cipherBytes[0:2] bytes used to store encrypted password length
 	length := readInt(cipherBytes) + 2
+
+	//cipherBytes[2:length] RSA encrypted AES password
 	random := cipherBytes[2:length]
 	rawSecret, err := rsa.DecryptPKCS1v15(rand.Reader, r.privateKey, random)
-	password := hex.EncodeToString(rawSecret)
-	fmt.Println(password)
-	fmt.Println(hex.EncodeToString(cipherBytes[length:]))
-	fmt.Println(base64.StdEncoding.EncodeToString(cipherBytes[length:]))
 	if err != nil {
 		return "", err
 	}
 
-	result, _ := decrypt(password, cipherBytes[length:])
+	//cipherBytes[length:] AES encrypted bytes
+	result, err := decryptAES(hex.EncodeToString(rawSecret), cipherBytes[length:])
+	if err != nil {
+		return "", err
+	}
 
 	return string(result), nil
 }
 
-func decrypt(password string, ciphertext []byte) ([]byte, error) {
+func decryptAES(password string, ciphertext []byte) ([]byte, error) {
 	springKey := deriveSpringKey(password)
 	block, err := aes.NewCipher(springKey)
 	if err != nil {
@@ -130,7 +174,7 @@ func decrypt(password string, ciphertext []byte) ([]byte, error) {
 	return PKCS5UnPadding(ciphertext), nil
 }
 
-func PKCS5Padding(ciphertext []byte, blockSize int, after int) []byte {
+func PKCS5Padding(ciphertext []byte, blockSize int) []byte {
 	padding := blockSize - len(ciphertext)%blockSize
 	padtext := bytes.Repeat([]byte{byte(padding)}, padding)
 	return append(ciphertext, padtext...)
@@ -150,17 +194,19 @@ func (r *RSASecretEncryptor) canDecrypt() bool {
 }
 
 func readInt(b []byte) uint16 {
-	return uint16(b[0] & 0xFF) << 8 |uint16(b[1] & 0xFF)
+	return uint16(b[0]&0xFF)<<8 | uint16(b[1]&0xFF)
 }
 
 func writeInt(length int) []byte {
-	data := make([]byte, 2);
-	data[0] = (byte) ((length >> 8) & 0xFF)
-	data[1] = (byte) (length & 0xFF)
+	data := make([]byte, 2)
+	data[0] = (byte)((length >> 8) & 0xFF)
+	data[1] = (byte)(length & 0xFF)
 	return data
 }
 
+//deriveSpringKey generates an AES key from a passphrase mimicking the java AES key generation found in
+//org.springframework.security.crypto.encrypt.AesBytesEncryptor.java
 func deriveSpringKey(passphrase string) []byte {
 	salt, _ := hex.DecodeString("deadbeef")
-	return pbkdf2.Key([]byte(passphrase),salt, 1024, 256, sha1.New)[:32]
+	return pbkdf2.Key([]byte(passphrase), salt, 1024, 256, sha1.New)[:32]
 }
